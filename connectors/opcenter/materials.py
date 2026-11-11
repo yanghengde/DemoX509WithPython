@@ -5,6 +5,8 @@ from uuid import UUID
 from xml.etree import ElementTree as ET
 
 from connectors.opcenter.client import OpcenterX509Client
+from connectors.opcenter.creation_store import CreationStore
+from connectors.opcenter.material_creation import MaterialCreationMixin
 
 EDM = '{http://docs.oasis-open.org/odata/ns/edm}'
 EDMX = '{http://docs.oasis-open.org/odata/ns/edmx}'
@@ -15,12 +17,15 @@ class MaterialNotFound(ValueError):
     pass
 
 
-class MaterialService:
+class MaterialService(MaterialCreationMixin):
     def __init__(self, client: OpcenterX509Client):
         self.client = client
         self._schema = None
         self._schema_at = 0
         self._schema_lock = asyncio.Lock()
+        self._creation_lock = asyncio.Lock()
+        import config
+        self.creations = CreationStore(config.DATA_DIR / 'material_creations.sqlite')
 
     async def schema(self, *, refresh=False):
         async with self._schema_lock:
@@ -57,6 +62,7 @@ class MaterialService:
                 raise ValueError('UADM 的 DM_Material 与 Material 关联契约不匹配。')
             self._schema = {'entity_set_count': len(sets), 'fields': fields,
                             'navigation': sorted(navigation), 'dm_navigation': sorted(dm_navigation),
+                            'actions': sorted({n.get('Name') for n in root.iter(EDM + 'Action') if n.get('Name')}),
                             'metadata_bytes': len(response.content)}
             self._schema_at = time.monotonic()
             return self._schema

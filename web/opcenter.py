@@ -4,11 +4,14 @@ from uuid import UUID
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr, field_validator
 
 import config
 from connectors.opcenter.client import OpcenterX509Client
 from connectors.opcenter.materials import MaterialNotFound, MaterialService
 from connectors.opcenter.x509 import CertificateError
+from connectors.opcenter.creation_store import MaterialCreateError
 
 router = APIRouter()
 
@@ -22,6 +25,8 @@ def service(request: Request) -> MaterialService:
 async def call(operation):
     try:
         return await operation()
+    except MaterialCreateError as exc:
+        raise HTTPException(exc.status, exc.detail) from None
     except CertificateError as exc:
         raise HTTPException(400, {'code': 'certificate_error', 'message': str(exc)}) from None
     except MaterialNotFound as exc:
@@ -79,3 +84,45 @@ async def materials(request: Request, keyword: str = Query('', max_length=120),
 @router.get('/api/opcenter/materials/{material_id}')
 async def material(request: Request, material_id: UUID):
     return await call(lambda: service(request).material(material_id))
+
+
+class CreateMaterialRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True, allow_inf_nan=False)
+    request_id: UUID
+    NId: StrictStr = Field(min_length=1, max_length=128)
+    Name: StrictStr = Field(min_length=1, max_length=256)
+    Revision: StrictStr = Field(min_length=1, max_length=64)
+    UOM: StrictStr = Field(min_length=1, max_length=128)
+    Description: StrictStr | None = Field(None, max_length=2000)
+    MaterialClassNId: StrictStr | None = Field(None, max_length=128)
+    SerialNumberProfile: StrictBool = False
+    FirstArticleInspection: StrictBool = False
+    Density: StrictFloat | None = Field(None, ge=0)
+    MinQuantity: StrictFloat | None = Field(None, ge=0)
+    MaxRecycleCount: StrictInt | None = Field(None, ge=0, le=2147483647)
+    RevisionExpression: StrictStr | None = Field(None, max_length=1000)
+
+    @field_validator('NId', 'Revision', 'UOM', 'MaterialClassNId')
+    @classmethod
+    def identifier(cls, value):
+        if value is not None and any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ValueError('编码和版本不能包含控制字符。')
+        return value
+
+
+@router.get('/api/opcenter/material-creation-options')
+async def creation_options(request: Request):
+    return await call(lambda: service(request).creation_options())
+
+
+@router.post('/api/opcenter/materials')
+async def create_material(request: Request, body: CreateMaterialRequest):
+    command = body.model_dump(exclude={'request_id'}, exclude_none=True)
+    command = {key: value for key, value in command.items() if value != ''}
+    result = await call(lambda: service(request).create_material(command, str(body.request_id)))
+    return JSONResponse(result, status_code=201 if result['verified'] else 202)
+
+
+@router.get('/api/opcenter/material-creations/{request_id}')
+async def creation_status(request: Request, request_id: UUID):
+    return await call(lambda: service(request).creation_status(str(request_id)))

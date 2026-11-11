@@ -167,7 +167,7 @@ def test_routes_real_read_flow_details_and_validation(monkeypatch):
         assert web.get('/api/opcenter/materials?top=101').status_code == 422
         assert web.get('/api/opcenter/materials?skip=-1').status_code == 422
         assert web.get('/api/opcenter/materials', params={'keyword': 'x' * 121}).status_code == 422
-        assert web.post('/api/opcenter/materials', json={}).status_code == 405
+        assert web.post('/api/opcenter/materials', json={}).status_code == 422
         assert len(requests) == before
 
 

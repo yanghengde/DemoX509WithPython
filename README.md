@@ -1,10 +1,28 @@
 # Demo 工作台 · Opcenter 物料连接测试
 
-已添加基于 X.509 的 Opcenter 只读接入。启动后打开 <http://127.0.0.1:8031/opcenter>，或从首页侧栏进入“Opcenter 物料”。不需要配置模型或 API Key。
+已添加基于 X.509 的 Opcenter 物料查询和创建。启动后打开 <http://127.0.0.1:8031/opcenter>，或从首页侧栏进入“Opcenter 物料”。不需要配置模型或 API Key。
 
 页面支持证书连接检测、物料编码/名称/描述搜索、分页、仅当前版本筛选、完整物料详情、所属分组、UADM 物料配置、原始 JSON 查看及本页 JSON 导出。数据来自当前服务，不提供演示数据。失败后清除上次结果，避免把旧数据作为本次查询结果。
 
 物料使用 **UADM 的 `AppU4DM/odata/DM_Material`** 接口，以 `$expand=Material` 关联编码、名称、版本等基础信息。详情还读取物料类别、供应商、功能代码及序列号管理、追溯、批次、首件检验、重量、体积等 UADM 配置。页面中的基础物料 Id 与 UADM 物料 Id 分别保留，查询总数以 `DM_Material` 为准。
+
+## 创建物料
+
+点击物料目录右上角“创建物料”，填写编码、名称、版本和计量单位。物料类别和描述可选，可开启序列号管理、首件检验；“更多配置”支持密度、粉末最小数量、最大回收次数和版本生效表达式。计量单位和物料类别来自本机 UADM，创建前再次检查有效性。
+
+创建调用 **`POST AppU4DM/odata/UADMCreateMaterialDefinition`**，请求包装为 `{"command": {...}}`。其中计量单位字段为 `UOM`；该命令由标准 UADM 页面使用，会创建 UADM 物料定义。不会改用基础模块的 `CreateMaterial`。
+
+提交后会按编码和版本回查 `DM_Material`，核对返回 Id、基础信息和管理标志。核实成功后自动刷新列表并定位新物料，可点击“查看物料详情”。若命令已成功但读取模型尚未同步，会显示等待同步，可点击“检查创建结果”。HTTP 200 中的 `Succeeded=false` 会作为业务失败处理，并显示 Opcenter 返回的错误说明。
+
+每次提交包含唯一 `request_id`，结果记录在 `data/material_creations.sqlite`。同一请求再次提交会复用已保存的结果，服务重启后也不会重放命令。页面提交期间禁用重复操作；如果请求超时或结果不明，保存本地草稿并提供只读的“检查创建结果”，不会自动重发。浏览器刷新后再次打开创建表单，会恢复未确认的提交并检查状态。请核实结果后再新建其他请求。
+
+| 本地 API | 用途 |
+| --- | --- |
+| `GET /api/opcenter/material-creation-options` | 获取全部计量单位、物料类别及命令名称 |
+| `POST /api/opcenter/materials` | 校验参数并提交一次创建命令，需唯一 UUID `request_id` |
+| `GET /api/opcenter/material-creations/{request_id}` | 只读查询或核实该次创建结果 |
+
+创建参数使用 UADM 命令的字段名：`NId`、`Name`、`Revision`、`UOM`、`Description`、`MaterialClassNId`、`SerialNumberProfile`、`FirstArticleInspection` 等。创建成功且回查核实返回 201；命令已成功、等待读取同步返回 202；已存在的编码/版本返回 409；参数或业务错误返回 4xx。写入请求不自动重试。
 
 ## Opcenter 配置
 

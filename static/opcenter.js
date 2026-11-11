@@ -16,6 +16,7 @@ async function api(path, options = {}) {
     error.status = response.status;
     error.upstream = info?.upstream_status;
     error.code = info?.code;
+    error.requestId = info?.request_id;
     throw error;
   }
   return data;
@@ -27,7 +28,7 @@ function setStatus(kind, title, message) {
 }
 function lock(value) {
   busy = value;
-  document.querySelectorAll('#searchForm input, #searchForm button, #searchForm select, #testConnection, #refresh').forEach(el => { el.disabled = value; });
+  document.querySelectorAll('#searchForm input, #searchForm button, #searchForm select, #testConnection, #refresh, #openCreate').forEach(el => { el.disabled = value; });
   $('export').disabled = value || !result?.items.length;
   $('previous').disabled = value || !result || offset === 0;
   $('next').disabled = value || !result?.has_more;
