@@ -1,4 +1,4 @@
-"""固定 Material 实体的只读查询；不接受任意 URL 或 OData 表达式。"""
+"""UADM / AppU4DM 的 DM_Material 只读查询，关联 Material 基础字段。"""
 import asyncio
 import time
 from uuid import UUID
@@ -9,6 +9,10 @@ from connectors.opcenter.client import OpcenterX509Client
 EDM = '{http://docs.oasis-open.org/odata/ns/edm}'
 EDMX = '{http://docs.oasis-open.org/odata/ns/edmx}'
 LIST_FIELDS = ('Id', 'NId', 'Name', 'Description', 'Revision', 'UoMNId', 'IsCurrent', 'LastUpdatedOn')
+
+
+class MaterialNotFound(ValueError):
+    pass
 
 
 class MaterialService:
@@ -44,8 +48,16 @@ class MaterialService:
                 entity_type = node.get('BaseType')
             if fields.get('Id') != 'Edm.Guid' or fields.get('NId') != 'Edm.String':
                 raise ValueError('Material 实体缺少预期的 Id / NId 字段，请核对部署契约。')
+            dm_type = types.get(sets.get('DM_Material'))
+            if dm_type is None:
+                raise ValueError('当前服务没有 UADM 的 DM_Material 实体，请使用 AppU4DM/odata 服务地址。')
+            dm_fields = {p.get('Name'): p.get('Type') for p in dm_type.findall(EDM + 'Property')}
+            dm_navigation = {p.get('Name'): p.get('Type') for p in dm_type.findall(EDM + 'NavigationProperty')}
+            if dm_fields.get('Material_Id') != 'Edm.Guid' or dm_navigation.get('Material') != sets['Material']:
+                raise ValueError('UADM 的 DM_Material 与 Material 关联契约不匹配。')
             self._schema = {'entity_set_count': len(sets), 'fields': fields,
-                            'navigation': sorted(navigation), 'metadata_bytes': len(response.content)}
+                            'navigation': sorted(navigation), 'dm_navigation': sorted(dm_navigation),
+                            'metadata_bytes': len(response.content)}
             self._schema_at = time.monotonic()
             return self._schema
 
@@ -62,16 +74,30 @@ class MaterialService:
             raise ValueError('物料接口返回的总数无效。')
         return data
 
+    @staticmethod
+    def linked_material(row, *, include_uadm=False):
+        material = row.get('Material')
+        if not isinstance(material, dict) or not material.get('Id') or not row.get('Id') or material['Id'] != row.get('Material_Id'):
+            raise ValueError('UADM 物料缺少有效的 Material 关联，无法显示完整物料内容。')
+        result = {**material, 'DM_MaterialId': row['Id']}
+        if include_uadm:
+            result['UADM'] = {key: value for key, value in row.items() if key != 'Material' and not key.startswith('@')}
+        return result
+
     async def check_connection(self):
         started = time.perf_counter()
         schema = await self.schema(refresh=True)
-        response = await self.client.request('GET', 'Material', params={'$top': 1, '$select': 'Id,NId'})
+        response = await self.client.request('GET', 'DM_Material', params={
+            '$top': 1, '$select': 'Id,Material_Id', '$expand': 'Material($select=Id,NId)'})
         data = self.collection(response)
+        for row in data['value']:
+            self.linked_material(row)
         return {'ok': True, 'authentication': 'X.509 / RS256 Bearer JWT',
+                'module': 'AppU4DM', 'entity': 'DM_Material',
                 'metadata_status': 200, 'materials_status': response.status_code,
                 'entity_set_count': schema['entity_set_count'], 'sample_rows': len(data['value']),
                 'elapsed_ms': round((time.perf_counter() - started) * 1000),
-                'message': '证书认证、元数据和物料读取均成功。'}
+                'message': '证书认证、UADM 元数据和 DM_Material 物料读取均成功。'}
 
     async def list_materials(self, *, keyword='', top=20, skip=0, current_only=False):
         if not 1 <= top <= 100 or not 0 <= skip <= 1_000_000 or len(keyword) > 120:
@@ -79,39 +105,47 @@ class MaterialService:
         schema = await self.schema()
         fields = schema['fields']
         params = {'$top': top, '$skip': skip, '$count': 'true',
-                  '$select': ','.join(f for f in LIST_FIELDS if f in fields), '$orderby': 'NId asc,Id asc'}
+                  '$select': 'Id,Material_Id',
+                  '$expand': 'Material($select=' + ','.join(f for f in LIST_FIELDS if f in fields) + ')',
+                  '$orderby': 'Material/NId asc,Id asc'}
         filters = []
         if keyword.strip():
             literal = keyword.strip().replace("'", "''")
             searchable = [f for f in ('NId', 'Name', 'Description') if fields.get(f) == 'Edm.String']
-            filters.append('(' + ' or '.join(f"contains({f},'{literal}')" for f in searchable) + ')')
+            filters.append('(' + ' or '.join(f"contains(Material/{f},'{literal}')" for f in searchable) + ')')
         if current_only:
             if fields.get('IsCurrent') != 'Edm.Boolean':
                 raise ValueError('当前部署不支持按当前版本筛选。')
-            filters.append('IsCurrent eq true')
+            filters.append('Material/IsCurrent eq true')
         if filters:
             params['$filter'] = ' and '.join(filters)
-        response = await self.client.request('GET', 'Material', params=params)
+        response = await self.client.request('GET', 'DM_Material', params=params)
         data = self.collection(response)
+        items = [self.linked_material(row) for row in data['value']]
         total = data.get('@odata.count')
         # Never follow a server-supplied nextLink with a signed credential.
-        return {'items': data['value'], 'total': total, 'top': top, 'skip': skip,
+        return {'items': items, 'total': total, 'top': top, 'skip': skip,
+                'module': 'AppU4DM', 'entity': 'DM_Material',
                 'has_more': skip + len(data['value']) < total if total is not None
                             else bool(data.get('@odata.nextLink')) or len(data['value']) == top}
 
     async def material(self, material_id: UUID):
         material_id = UUID(str(material_id))
         schema = await self.schema()
-        expand = [p for p in ('Properties', 'MaterialGroups') if p in schema['navigation']]
-        response = await self.client.request('GET', f'Material({material_id})',
-                                             params={'$expand': ','.join(expand)} if expand else None)
-        try:
-            data = response.json()
-        except ValueError:
-            raise ValueError('物料详情未返回有效 JSON。') from None
-        if not isinstance(data, dict) or str(data.get('Id', '')).lower() != str(material_id):
-            raise ValueError('物料详情的 Id 与请求不一致。')
-        return data
+        nested = [p for p in ('Properties', 'MaterialGroups') if p in schema['navigation']]
+        expand = ['Material($expand=' + ','.join(nested) + ')' if nested else 'Material']
+        expand += [p for p in ('MaterialClass', 'Supplier', 'FunctionalCode') if p in schema['dm_navigation']]
+        response = await self.client.request('GET', 'DM_Material', params={
+            '$top': 2, '$filter': f'Material_Id eq {material_id}', '$expand': ','.join(expand)})
+        rows = self.collection(response)['value']
+        if not rows:
+            raise MaterialNotFound('在 UADM 的 DM_Material 中未找到该物料。')
+        if len(rows) != 1:
+            raise ValueError('同一 Material 对应多个 UADM 物料记录，请核对部署数据。')
+        result = self.linked_material(rows[0], include_uadm=True)
+        if str(result['Id']).lower() != str(material_id):
+            raise ValueError('UADM 物料详情的 Id 与请求不一致。')
+        return result
 
     async def close(self):
         await self.client.close()

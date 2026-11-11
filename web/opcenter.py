@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse
 
 import config
 from connectors.opcenter.client import OpcenterX509Client
-from connectors.opcenter.materials import MaterialService
+from connectors.opcenter.materials import MaterialNotFound, MaterialService
 from connectors.opcenter.x509 import CertificateError
 
 router = APIRouter()
@@ -24,6 +24,8 @@ async def call(operation):
         return await operation()
     except CertificateError as exc:
         raise HTTPException(400, {'code': 'certificate_error', 'message': str(exc)}) from None
+    except MaterialNotFound as exc:
+        raise HTTPException(404, {'code': 'material_not_found', 'message': str(exc)}) from None
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
         message = {401: 'Opcenter 拒绝证书身份，请检查证书信任、角色映射、issuer/audience 和系统时间。',
@@ -52,6 +54,7 @@ def page():
 @router.get('/api/opcenter/config')
 def connection_config():
     return {'base_url': config.OPCENTER_BASE_URL, 'auth_mode': 'X.509 / RS256',
+            'module': 'AppU4DM', 'entity': 'DM_Material',
             'certificate_source': config.OPCENTER_X509_SOURCE,
             'store_location': config.OPCENTER_X509_STORE_LOCATION,
             'thumbprint': config.OPCENTER_X509_THUMBPRINT,
